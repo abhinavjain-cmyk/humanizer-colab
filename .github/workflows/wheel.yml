@@ -23,26 +23,26 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install CUDA 12.4 toolkit (nvcc, cudart, cublas)
-        uses: Jimver/cuda-toolkit@v0.2.21
-        id: cuda
-        with:
-          cuda: "12.4.1"
-          method: network
-          sub-packages: '["nvcc", "cudart-dev", "libcublas-dev", "cuda-cudart", "libcublas"]'
-          non-cuda-sub-packages: '[]'
-          use-github-cache: true
+      - name: Install CUDA 12.4 toolkit from NVIDIA apt repo (nvcc, cudart, cublas)
+        run: |
+          set -e
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cuda-nvcc-12-4 cuda-cudart-dev-12-4 libcublas-dev-12-4 cuda-crt-12-4 cuda-nvvm-12-4 ninja-build
+          ls /usr/local/cuda-12.4/bin/nvcc /usr/local/cuda-12.4/lib64/stubs/libcuda.so
+          /usr/local/cuda-12.4/bin/nvcc --version
 
       - name: Build wheel
         env:
-          CUDACXX: ${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc
+          CUDACXX: /usr/local/cuda-12.4/bin/nvcc
           FORCE_CMAKE: "1"
         run: |
           set -e
-          CUDA="${{ steps.cuda.outputs.CUDA_PATH }}"
-          ls "$CUDA/lib64/stubs" || true
+          CUDA=/usr/local/cuda-12.4
+          export PATH="$CUDA/bin:$PATH"
           export LIBRARY_PATH="$CUDA/lib64/stubs:$CUDA/lib64"
-          export CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_F16=on -DCMAKE_CUDA_ARCHITECTURES=75;86;89 -DLLAVA_BUILD=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DCMAKE_CUDA_COMPILER=$CUDA/bin/nvcc -DCMAKE_EXE_LINKER_FLAGS=-L$CUDA/lib64/stubs -DCMAKE_SHARED_LINKER_FLAGS=-L$CUDA/lib64/stubs"
+          export CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_F16=on -DCMAKE_CUDA_ARCHITECTURES=75;86;89 -DLLAVA_BUILD=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DCMAKE_CUDA_COMPILER=$CUDA/bin/nvcc -DCUDAToolkit_ROOT=$CUDA -DCMAKE_EXE_LINKER_FLAGS=-L$CUDA/lib64/stubs -DCMAKE_SHARED_LINKER_FLAGS=-L$CUDA/lib64/stubs"
           python -m pip install -U pip wheel
           python -m pip wheel "llama-cpp-python==0.3.19" --no-deps --no-binary llama-cpp-python -w dist
           ls -la dist

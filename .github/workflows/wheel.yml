@@ -1,0 +1,55 @@
+name: build-llama-cpp-wheel
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/wheel.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  wheel:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install CUDA 12.4 toolkit (nvcc, cudart, cublas)
+        uses: Jimver/cuda-toolkit@v0.2.21
+        id: cuda
+        with:
+          cuda: "12.4.1"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "libcublas-dev", "cuda-cudart", "libcublas"]'
+          non-cuda-sub-packages: '[]'
+          use-github-cache: true
+
+      - name: Build wheel
+        env:
+          CUDACXX: ${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc
+          FORCE_CMAKE: "1"
+        run: |
+          set -e
+          CUDA="${{ steps.cuda.outputs.CUDA_PATH }}"
+          ls "$CUDA/lib64/stubs" || true
+          export LIBRARY_PATH="$CUDA/lib64/stubs:$CUDA/lib64"
+          export CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_F16=on -DCMAKE_CUDA_ARCHITECTURES=75;86;89 -DLLAVA_BUILD=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF -DCMAKE_CUDA_COMPILER=$CUDA/bin/nvcc -DCMAKE_EXE_LINKER_FLAGS=-L$CUDA/lib64/stubs -DCMAKE_SHARED_LINKER_FLAGS=-L$CUDA/lib64/stubs"
+          python -m pip install -U pip wheel
+          python -m pip wheel "llama-cpp-python==0.3.19" --no-deps --no-binary llama-cpp-python -w dist
+          ls -la dist
+
+      - name: Upload to release "wheels"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view wheels >/dev/null 2>&1 || gh release create wheels --title "Prebuilt llama-cpp-python CUDA wheels for Colab (T4/L4/A100)" --notes "llama-cpp-python 0.3.19, CUDA 12.4, sm_75/86/89. Installed by cell 2 of the notebook."
+          gh release upload wheels dist/*.whl --clobber

@@ -270,40 +270,80 @@ def numbers(s):
     return set(re.findall(r"\d[\d,.]*\d|\d", s))
 
 
+def _humanize_answer(blks, rewrite, min_words, max_words, samples):
+    """One answer: rewrite (best of `samples`), re-block, trim to band. Returns (blocks incl. question, report row, log lines)."""
+    q = blks[0]
+    src = answer_text(blks)
+    src_words = words(src)
+    want = numbers(src)
+    best, lines = None, []
+    for s in range(max(1, samples)):
+        out = rewrite(src)
+        cand = text_to_blocks(out)
+        n = body_words(cand)
+        nums_ok = want <= numbers(out)
+        in_band = min_words <= n <= max_words
+        score = (nums_ok, in_band, n >= min_words, -abs(n - (min_words + max_words) / 2))
+        lines.append(f"   sample {s + 1}: {n} words, numbers kept: {nums_ok}")
+        if best is None or score > best[0]:
+            best = (score, cand, n, nums_ok)
+        if nums_ok and in_band:
+            break
+    cand, n, nums_ok = best[1], best[2], best[3]
+    if n > max_words:
+        cand, n = trim_blocks(cand, max_words)
+    flag = "" if min_words <= n <= max_words else ("SHORT" if n < min_words else "LONG")
+    row = dict(question=q["text"][:70], words_in=src_words, words_out=n, numbers_ok=nums_ok, flag=flag)
+    lines.append(f"   -> {src_words} -> {n} words {flag}{'' if nums_ok else '  CHECK NUMBERS'}")
+    return [q] + cand, row, lines
+
+
+def humanize_docs(docs, rewrite, min_words=400, max_words=450, samples=1, workers=6, log=print):
+    """Rewrite every answer of every doc, `workers` answers at a time across all docs.
+    docs: list of (name, doc). Returns list of (name, new_doc, report) in input order."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
+
+    plan, jobs = [], []
+    for di, (name, doc) in enumerate(docs):
+        parts = groups(doc)
+        plan.append(parts)
+        for gi, (kind, blks) in enumerate(parts):
+            if kind == "q":
+                jobs.append((di, gi, blks))
+    log(f"{len(jobs)} answers from {len(docs)} document(s), {workers} at a time")
+    done, results, t0 = 0, {}, time.time()
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_humanize_answer, blks, rewrite, min_words, max_words, samples): (di, gi) for di, gi, blks in jobs}
+        for f in as_completed(futs):
+            di, gi = futs[f]
+            try:
+                results[(di, gi)] = f.result()
+            except Exception as e:  # keep the original answer if the model call failed
+                blks = plan[di][gi][1]
+                results[(di, gi)] = (blks, dict(question=blks[0]["text"][:70], words_in=body_words(blks), words_out=body_words(blks), numbers_ok=True, flag=f"ERROR {type(e).__name__}"), [f"   failed: {e}"])
+            done += 1
+            log(f"[{done}/{len(jobs)} {time.time() - t0:.0f}s] {docs[di][0][:40]} | {results[(di, gi)][1]['question'][:50]}")
+            for line in results[(di, gi)][2]:
+                log(line)
+    out = []
+    for di, (name, doc) in enumerate(docs):
+        blocks, report = [], []
+        for gi, (kind, blks) in enumerate(plan[di]):
+            if kind == "q":
+                nb, row, _ = results[(di, gi)]
+                blocks.extend(nb)
+                report.append(row)
+            else:
+                blocks.extend(blks)
+        out.append((name, dict(front=doc["front"], blocks=blocks), report))
+    return out
+
+
 def humanize_blocks(doc, rewrite, min_words=400, max_words=450, samples=1, log=print):
-    """Rewrite every answer. `rewrite(text) -> str` is the model. Returns a new doc and a report."""
-    new_blocks, report = [], []
-    for kind, blks in groups(doc):
-        if kind != "q":
-            new_blocks.extend(blks)
-            continue
-        q = blks[0]
-        src = answer_text(blks)
-        src_words = words(src)
-        want = numbers(src)
-        best = None
-        for s in range(max(1, samples)):
-            out = rewrite(src)
-            cand = text_to_blocks(out)
-            n = body_words(cand)
-            nums_ok = want <= numbers(out)
-            in_band = min_words <= n <= max_words
-            # prefer: numbers kept, inside band, else above the band (trimmable), else longest
-            score = (nums_ok, in_band, n >= min_words, -abs(n - (min_words + max_words) / 2))
-            log(f"   sample {s + 1}: {n} words, numbers kept: {nums_ok}")
-            if best is None or score > best[0]:
-                best = (score, cand, n, nums_ok)
-            if nums_ok and in_band:
-                break
-        cand, n, nums_ok = best[1], best[2], best[3]
-        if n > max_words:
-            cand, n = trim_blocks(cand, max_words)
-        flag = "" if min_words <= n <= max_words else (" SHORT" if n < min_words else " LONG")
-        report.append(dict(question=q["text"][:70], words_in=src_words, words_out=n, numbers_ok=nums_ok, flag=flag.strip()))
-        log(f"   -> {src_words} -> {n} words{flag}{'' if nums_ok else '  CHECK NUMBERS'}")
-        new_blocks.append(q)
-        new_blocks.extend(cand)
-    return dict(front=doc["front"], blocks=new_blocks), report
+    """Single-document, sequential (kept for compatibility)."""
+    (_, new, report), = humanize_docs([("doc", doc)], rewrite, min_words, max_words, samples, workers=1, log=log)
+    return new, report
 
 
 # ----------------------------------------------------------------------------
